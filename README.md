@@ -1,9 +1,9 @@
 # TravelGPT – Itinerary Planner (Prototype)
 
 This is a compact, ready-to-run prototype of an **LLM-powered itinerary planner** with optional integrations:
-- Mapbox (geocoding)
+- TomTom (geocoding)
 - OpenWeatherMap (current weather)
-- OpenAI (LLM-based itinerary generation)
+- Gemini (LLM-based itinerary generation)
 
 If API keys are not available, the app falls back to a rule-based offline itinerary generator so the app still works end-to-end.
 
