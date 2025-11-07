@@ -4,6 +4,7 @@ import requests
 from flask import Flask, request, jsonify, render_template
 from dotenv import load_dotenv
 import google.generativeai as genai
+import pycountry
 
 # --------------------------
 # Load Environment Variables
@@ -23,6 +24,15 @@ app = Flask(__name__, static_folder="static", template_folder="templates")
 # --------------------------
 # API Helper Functions
 # --------------------------
+def get_country_code(destination):
+    """Extract country code (ISO alpha-2) from destination."""
+    try:
+        country = pycountry.countries.lookup(destination.split(",")[-1].strip())
+        return country.alpha_2
+    except:
+        return "US"  # fallback if not found
+
+
 def get_weather(destination):
     """Fetch current weather for a city."""
     if not OPENWEATHER_KEY:
@@ -40,23 +50,27 @@ def get_weather(destination):
         print("❌ Weather API Error:", e)
         return None
 
-def search_places_tomtom(query, limit=3):
-    """Search for places using TomTom API."""
+
+def search_places_tomtom(query, destination="France", limit=3):
+    """Search for real places using TomTom API with correct country."""
     if not TOMTOM_KEY:
         return []
     try:
+        country_code = get_country_code(destination)
         url = f"https://api.tomtom.com/search/2/search/{query}.json"
-        params = {"key": TOMTOM_KEY, "limit": limit, "countrySet": "IN"}
+        params = {"key": TOMTOM_KEY, "limit": limit, "countrySet": country_code}
         res = requests.get(url, params=params)
         data = res.json()
         results = [r["poi"]["name"] for r in data.get("results", []) if "poi" in r]
+        print(f"🌍 Found {len(results)} {query} in {country_code}")
         return results
     except Exception as e:
         print("❌ TomTom API Error:", e)
         return []
 
+
 def generate_with_gemini(prompt):
-    """Generate response using Gemini."""
+    """Generate itinerary using Gemini API."""
     try:
         model = genai.GenerativeModel("gemini-1.5-flash")
         response = model.generate_content(prompt)
@@ -65,8 +79,9 @@ def generate_with_gemini(prompt):
         print("❌ Gemini generation error:", e)
         return None
 
+
 def generate_rule_based_itinerary(destination, days, interests):
-    """Rule-based fallback itinerary using TomTom."""
+    """Generate non-repetitive itinerary using TomTom results."""
     interests = interests.lower()
     activity_types = {
         "nature": "park",
@@ -75,25 +90,32 @@ def generate_rule_based_itinerary(destination, days, interests):
         "adventure": "hiking",
         "relax": "spa",
         "temple": "temple",
-        "spiritual": "temple"
+        "spiritual": "church"
     }
 
     itinerary = []
+    used_places = set()
+
     for i in range(days):
         day_items = []
-        for interest in interests.split(","):
-            interest = interest.strip()
-            keyword = activity_types.get(interest, "tourist attraction")
-            places = search_places_tomtom(keyword)
-            if places:
-                place = random.choice(places)
-                time = random.choice(["Morning", "Afternoon", "Evening"])
-                day_items.append({"time": time, "activity": f"Visit {place} ({interest})"})
-        while len(day_items) < 3:
-            day_items.append({
-                "time": random.choice(["Morning", "Afternoon", "Evening"]),
-                "activity": "Explore local cafes or markets"
-            })
+        for time in ["Morning", "Afternoon", "Evening"]:
+            added = False
+            for interest in interests.split(","):
+                interest = interest.strip()
+                keyword = activity_types.get(interest, "tourist attraction")
+                places = search_places_tomtom(keyword, destination, limit=5)
+                if places:
+                    choices = [p for p in places if p not in used_places]
+                    if not choices:
+                        continue
+                    place = random.choice(choices)
+                    used_places.add(place)
+                    day_items.append({"time": time, "activity": f"Visit {place} ({interest})"})
+                    added = True
+                    break
+            if not added:
+                day_items.append({"time": time, "activity": "Explore a local market or cafe"})
+
         itinerary.append({"day": i + 1, "items": day_items})
 
     return {
@@ -103,7 +125,7 @@ def generate_rule_based_itinerary(destination, days, interests):
     }
 
 # --------------------------
-# Routes
+# Flask Routes
 # --------------------------
 @app.route("/")
 def home():
@@ -119,11 +141,13 @@ def api_itinerary():
 
     weather_note = get_weather(destination)
 
+    # Gemini Prompt
     prompt = f"""
-    You are an expert travel planner. Create a {days}-day travel itinerary for {destination}.
+    You are an expert travel planner. Create a {days}-day itinerary for {destination}.
     User interests: {interests}.
-    Include cultural, natural, and food-related suggestions. Avoid repetition.
-    Respond in plain text, concise and structured by day.
+    Suggest unique experiences and avoid repetition.
+    Each day should have Morning, Afternoon, and Evening activities.
+    Respond in clear structured text.
     """
 
     ai_result = generate_with_gemini(prompt)
@@ -131,6 +155,7 @@ def api_itinerary():
         ai_result["meta"] = {"destination": destination, "days": days, "weather_note": weather_note}
         return jsonify({"ok": True, "generated": ai_result})
 
+    # If Gemini fails → fallback to TomTom-based
     fallback = generate_rule_based_itinerary(destination, days, interests)
     fallback["meta"]["weather_note"] = weather_note
     return jsonify({"ok": True, "generated": fallback})
