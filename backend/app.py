@@ -1,5 +1,6 @@
 from flask import Flask, render_template, request, jsonify
 import os, requests, json
+import google.generativeai as genai
 from dotenv import load_dotenv
 load_dotenv()
 
@@ -78,24 +79,21 @@ def generate_rule_based_itinerary(destination, days, interests, weather_note=Non
     meta = {"destination": destination, "days": days, "interests": interests, "weather_note": weather_note}
     return {"meta": meta, "itinerary": plan, "source": "rule-based (offline)"}
 
-def generate_with_openai(prompt):
-    """Generate itinerary using OpenAI if API key is present"""
-    if not OPENAI_KEY:
+
+
+def generate_with_gemini(prompt):
+    """Generate itinerary using Google Gemini API"""
+    key = os.getenv("GEMINI_API_KEY")
+    if not key:
         return None
     try:
-        import openai
-        openai.api_key = OPENAI_KEY
-        resp = openai.ChatCompletion.create(
-            model="gpt-4o-mini", # placeholder: user may change to available model
-            messages=[{"role":"system","content":"You are an assistant that creates day-wise travel itineraries."},
-                      {"role":"user","content":prompt}],
-            max_tokens=700,
-            temperature=0.7
-        )
-        text = resp["choices"][0]["message"]["content"]
-        return {"text": text, "source": "openai"}
+        genai.configure(api_key=key)
+        model = genai.GenerativeModel("gemini-1.5-flash")  # or "gemini-1.5-pro"
+        response = model.generate_content(prompt)
+        text = response.text
+        return {"text": text, "source": "gemini"}
     except Exception as e:
-        app.logger.warning("OpenAI generation failed: %s", e)
+        app.logger.warning("Gemini generation failed: %s", e)
     return None
 
 @app.route("/")
@@ -115,7 +113,7 @@ def api_itinerary():
         weather_note = get_weather(geodata["lat"], geodata["lng"])
     # Try OpenAI generation first if key present
     prompt = f"Create a {days}-day travel itinerary for {destination}. Interests: {interests}. Current weather: {weather_note}."
-    ai_resp = generate_with_openai(prompt)
+    ai_resp = generate_with_gemini(prompt)
     if ai_resp:
         return jsonify({"ok": True, "generated": ai_resp})
     # Fallback to rule-based generator
