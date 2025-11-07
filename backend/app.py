@@ -1,124 +1,143 @@
-from flask import Flask, render_template, request, jsonify
-import os, requests, json
-import google.generativeai as genai
+import os
+import random
+import requests
+from flask import Flask, request, jsonify, render_template
 from dotenv import load_dotenv
+import google.generativeai as genai
+
+# --------------------------
+# Load Environment Variables
+# --------------------------
 load_dotenv()
+
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+TOMTOM_KEY = os.getenv("TOMTOM_KEY")
+OPENWEATHER_KEY = os.getenv("OPENWEATHER_KEY")
+
+# Initialize Gemini
+if GEMINI_API_KEY:
+    genai.configure(api_key=GEMINI_API_KEY)
 
 app = Flask(__name__, static_folder="static", template_folder="templates")
 
-# Config from environment
-OPENAI_KEY = os.getenv("OPENAI_API_KEY")  # optional
-MAPBOX_TOKEN = os.getenv("MAPBOX_TOKEN")  # optional
-OWM_KEY = os.getenv("OPENWEATHER_KEY")    # optional
-
-def geocode_place(place):
-    """Geocode using TomTom API"""
-    key = os.getenv("TOMTOM_KEY")
-    if not key:
+# --------------------------
+# API Helper Functions
+# --------------------------
+def get_weather(destination):
+    """Fetch current weather for a city."""
+    if not OPENWEATHER_KEY:
         return None
-    url = f"https://api.tomtom.com/search/2/geocode/{requests.utils.requote_uri(place)}.json"
-    params = {"key": key, "limit": 1}
     try:
-        r = requests.get(url, params=params, timeout=8)
-        r.raise_for_status()
-        data = r.json()
-        if data.get("results"):
-            loc = data["results"][0]["position"]
-            address = data["results"][0].get("address", {}).get("freeformAddress", place)
-            return {"name": address, "lat": loc["lat"], "lng": loc["lon"]}
-    except Exception as e:
-        app.logger.warning("TomTom geocode failed: %s", e)
-    return None
-
-
-def get_weather(lat, lon):
-    """Attempt to fetch current weather via OpenWeatherMap (optional). Returns simple string or None"""
-    if not OWM_KEY:
-        return None
-    url = "https://api.openweathermap.org/data/2.5/weather"
-    params = {"lat": lat, "lon": lon, "appid": OWM_KEY, "units": "metric"}
-    try:
-        r = requests.get(url, params=params, timeout=8)
-        r.raise_for_status()
-        d = r.json()
-        desc = d["weather"][0]["description"]
-        temp = d["main"]["temp"]
+        url = f"https://api.openweathermap.org/data/2.5/weather?q={destination}&appid={OPENWEATHER_KEY}&units=metric"
+        res = requests.get(url)
+        data = res.json()
+        if data.get("cod") != 200:
+            return None
+        desc = data["weather"][0]["description"]
+        temp = data["main"]["temp"]
         return f"{desc}, {temp}°C"
     except Exception as e:
-        app.logger.warning("Weather fetch failed: %s", e)
-    return None
+        print("❌ Weather API Error:", e)
+        return None
 
-def generate_rule_based_itinerary(destination, days, interests, weather_note=None):
-    """Simple offline generator that creates an itinerary using heuristics and canned activities"""
-    base_activities = {
-        "nature": ["City park / nature reserve", "Hiking trail", "Scenic viewpoint", "Botanical garden"],
-        "culture": ["City museum", "Historic walking tour", "Art gallery", "Local market"],
-        "food": ["Food walking tour", "Local restaurant tasting", "Street food stalls", "Cooking class"],
-        "adventure": ["Kayaking / water sports", "Zipline / outdoor activity", "Cycling tour", "Rock climbing (guided)"],
-        "relax": ["Spa / wellness center", "Beach / lake day", "Cafe hop", "Sunset viewpoint"]
-    }
-    # flatten fallback activities
-    default = ["City highlights tour", "Local market visit", "Popular viewpoint", "Leisure time / cafe"]
-    plan = []
-    interests = [i.strip().lower() for i in interests.split(",") if i.strip()]
-    if not interests:
-        interests = ["culture","food"]
-    for day in range(1, days+1):
-        day_plan = {"day": day, "items": []}
-        # pick interest for the day in round-robin
-        interest = interests[(day-1) % len(interests)]
-        candidates = base_activities.get(interest, default)
-        # pick two items
-        first = candidates[(day*2-2) % len(candidates)]
-        second = candidates[(day*2-1) % len(candidates)]
-        day_plan["items"].append({"time": "Morning", "activity": first})
-        day_plan["items"].append({"time": "Afternoon", "activity": second})
-        # optionally add evening suggestion
-        day_plan["items"].append({"time": "Evening", "activity": "Local dining / explore nightlife"})
-        plan.append(day_plan)
-    meta = {"destination": destination, "days": days, "interests": interests, "weather_note": weather_note}
-    return {"meta": meta, "itinerary": plan, "source": "rule-based (offline)"}
-
-
+def search_places_tomtom(query, limit=3):
+    """Search for places using TomTom API."""
+    if not TOMTOM_KEY:
+        return []
+    try:
+        url = f"https://api.tomtom.com/search/2/search/{query}.json"
+        params = {"key": TOMTOM_KEY, "limit": limit, "countrySet": "IN"}
+        res = requests.get(url, params=params)
+        data = res.json()
+        results = [r["poi"]["name"] for r in data.get("results", []) if "poi" in r]
+        return results
+    except Exception as e:
+        print("❌ TomTom API Error:", e)
+        return []
 
 def generate_with_gemini(prompt):
-    """Generate itinerary using Google Gemini API"""
-    key = os.getenv("GEMINI_API_KEY")
-    if not key:
-        return None
+    """Generate response using Gemini."""
     try:
-        genai.configure(api_key=key)
-        model = genai.GenerativeModel("gemini-1.5-flash")  # or "gemini-1.5-pro"
+        model = genai.GenerativeModel("gemini-1.5-flash")
         response = model.generate_content(prompt)
-        text = response.text
-        return {"text": text, "source": "gemini"}
+        return {"source": "gemini", "text": response.text}
     except Exception as e:
-        app.logger.warning("Gemini generation failed: %s", e)
-    return None
+        print("❌ Gemini generation error:", e)
+        return None
 
+def generate_rule_based_itinerary(destination, days, interests):
+    """Rule-based fallback itinerary using TomTom."""
+    interests = interests.lower()
+    activity_types = {
+        "nature": "park",
+        "culture": "museum",
+        "food": "restaurant",
+        "adventure": "hiking",
+        "relax": "spa",
+        "temple": "temple",
+        "spiritual": "temple"
+    }
+
+    itinerary = []
+    for i in range(days):
+        day_items = []
+        for interest in interests.split(","):
+            interest = interest.strip()
+            keyword = activity_types.get(interest, "tourist attraction")
+            places = search_places_tomtom(keyword)
+            if places:
+                place = random.choice(places)
+                time = random.choice(["Morning", "Afternoon", "Evening"])
+                day_items.append({"time": time, "activity": f"Visit {place} ({interest})"})
+        while len(day_items) < 3:
+            day_items.append({
+                "time": random.choice(["Morning", "Afternoon", "Evening"]),
+                "activity": "Explore local cafes or markets"
+            })
+        itinerary.append({"day": i + 1, "items": day_items})
+
+    return {
+        "source": "rule-based",
+        "meta": {"destination": destination, "days": days},
+        "itinerary": itinerary
+    }
+
+# --------------------------
+# Routes
+# --------------------------
 @app.route("/")
 def home():
     return render_template("index.html")
 
 @app.route("/api/itinerary", methods=["POST"])
 def api_itinerary():
+    print("🛰️ /api/itinerary called")
     data = request.json or {}
-    destination = data.get("destination","Unknown")
+    destination = data.get("destination", "Unknown")
     days = int(data.get("days", 3))
     interests = data.get("interests", "culture, food")
-    # try geocode
-    geodata = geocode_place(destination)
-    weather_note = None
-    if geodata:
-        weather_note = get_weather(geodata["lat"], geodata["lng"])
-    # Try OpenAI generation first if key present
-    prompt = f"Create a {days}-day travel itinerary for {destination}. Interests: {interests}. Current weather: {weather_note}."
-    ai_resp = generate_with_gemini(prompt)
-    if ai_resp:
-        return jsonify({"ok": True, "generated": ai_resp})
-    # Fallback to rule-based generator
-    fallback = generate_rule_based_itinerary(destination, days, interests, weather_note)
+
+    weather_note = get_weather(destination)
+
+    prompt = f"""
+    You are an expert travel planner. Create a {days}-day travel itinerary for {destination}.
+    User interests: {interests}.
+    Include cultural, natural, and food-related suggestions. Avoid repetition.
+    Respond in plain text, concise and structured by day.
+    """
+
+    ai_result = generate_with_gemini(prompt)
+    if ai_result:
+        ai_result["meta"] = {"destination": destination, "days": days, "weather_note": weather_note}
+        return jsonify({"ok": True, "generated": ai_result})
+
+    fallback = generate_rule_based_itinerary(destination, days, interests)
+    fallback["meta"]["weather_note"] = weather_note
     return jsonify({"ok": True, "generated": fallback})
 
-if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=int(os.getenv("PORT", 7860)), debug=True)
+# --------------------------
+# Render-ready Entry Point
+# --------------------------
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host="0.0.0.0", port=port, debug=True)
