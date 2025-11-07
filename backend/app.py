@@ -52,18 +52,42 @@ def get_weather(destination):
 
 
 def search_places_tomtom(query, destination="France", limit=3):
-    """Search for real places using TomTom API with correct country."""
+    """Search nearby places using TomTom Geocoding + POI Search for accurate results."""
     if not TOMTOM_KEY:
         return []
+
     try:
-        country_code = get_country_code(destination)
-        url = f"https://api.tomtom.com/search/2/search/{query}.json"
-        params = {"key": TOMTOM_KEY, "limit": limit, "countrySet": country_code}
-        res = requests.get(url, params=params)
-        data = res.json()
+        # Step 1️⃣: Geocode the destination to get lat/lon
+        geo_url = f"https://api.tomtom.com/search/2/geocode/{destination}.json"
+        geo_params = {"key": TOMTOM_KEY, "limit": 1}
+        geo_res = requests.get(geo_url, params=geo_params)
+        geo_data = geo_res.json()
+
+        if not geo_data.get("results"):
+            print(f"⚠️ Geocoding failed for: {destination}")
+            return []
+
+        lat = geo_data["results"][0]["position"]["lat"]
+        lon = geo_data["results"][0]["position"]["lon"]
+        print(f"📍 Geocoded {destination} to {lat}, {lon}")
+
+        # Step 2️⃣: Search for POIs near that location (within 50km)
+        search_url = f"https://api.tomtom.com/search/2/poiSearch/{query}.json"
+        search_params = {
+            "key": TOMTOM_KEY,
+            "lat": lat,
+            "lon": lon,
+            "radius": 50000,   # 50 km radius
+            "limit": limit
+        }
+        search_res = requests.get(search_url, params=search_params)
+        data = search_res.json()
+
+        # Step 3️⃣: Extract POI names
         results = [r["poi"]["name"] for r in data.get("results", []) if "poi" in r]
-        print(f"🌍 Found {len(results)} {query} in {country_code}")
+        print(f"🌍 Found {len(results)} {query} near {destination}")
         return results
+
     except Exception as e:
         print("❌ TomTom API Error:", e)
         return []
