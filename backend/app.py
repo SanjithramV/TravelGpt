@@ -1,6 +1,8 @@
 import os
 import random
-import requests
+import json
+import asyncio
+import aiohttp
 from flask import Flask, request, jsonify, render_template
 from dotenv import load_dotenv
 import google.generativeai as genai
@@ -22,90 +24,62 @@ if GEMINI_API_KEY:
 app = Flask(__name__, static_folder="static", template_folder="templates")
 
 # --------------------------
-# API Helper Functions
+# Async Helper Functions
 # --------------------------
-def get_country_code(destination):
-    """Extract country code (ISO alpha-2) from destination."""
+
+async def fetch_json(session, url, params):
+    """Generic async JSON fetch."""
     try:
-        country = pycountry.countries.lookup(destination.split(",")[-1].strip())
-        return country.alpha_2
-    except:
-        return "US"  # fallback if not found
+        async with session.get(url, params=params) as resp:
+            return await resp.json()
+    except Exception as e:
+        print(f"❌ API Fetch Error: {e}")
+        return {}
 
-
-def get_weather(destination):
-    """Fetch current weather for a city."""
+async def get_weather_async(session, destination):
+    """Async weather lookup."""
     if not OPENWEATHER_KEY:
         return None
-    try:
-        url = f"https://api.openweathermap.org/data/2.5/weather?q={destination}&appid={OPENWEATHER_KEY}&units=metric"
-        res = requests.get(url)
-        data = res.json()
-        if data.get("cod") != 200:
-            return None
-        desc = data["weather"][0]["description"]
-        temp = data["main"]["temp"]
-        return f"{desc}, {temp}°C"
-    except Exception as e:
-        print("❌ Weather API Error:", e)
+    url = "https://api.openweathermap.org/data/2.5/weather"
+    params = {"q": destination, "appid": OPENWEATHER_KEY, "units": "metric"}
+    data = await fetch_json(session, url, params)
+    if data.get("cod") != 200:
         return None
+    desc = data["weather"][0]["description"]
+    temp = data["main"]["temp"]
+    return f"{desc}, {temp}°C"
 
+async def geocode_destination(session, destination):
+    """Get coordinates for a destination using TomTom."""
+    if not TOMTOM_KEY:
+        return None, None
+    geo_url = f"https://api.tomtom.com/search/2/geocode/{destination}.json"
+    params = {"key": TOMTOM_KEY, "limit": 1}
+    data = await fetch_json(session, geo_url, params)
+    if not data.get("results"):
+        print(f"⚠️ Geocoding failed for: {destination}")
+        return None, None
+    lat = data["results"][0]["position"]["lat"]
+    lon = data["results"][0]["position"]["lon"]
+    print(f"📍 Geocoded {destination} → {lat}, {lon}")
+    return lat, lon
 
-def search_places_tomtom(query, destination="France", limit=3):
-    """Search nearby places using TomTom Geocoding + POI Search for accurate results."""
+async def search_places_tomtom_async(session, query, destination="France", limit=3):
+    """Async TomTom POI Search."""
     if not TOMTOM_KEY:
         return []
-
-    try:
-        # Step 1️⃣: Geocode the destination to get lat/lon
-        geo_url = f"https://api.tomtom.com/search/2/geocode/{destination}.json"
-        geo_params = {"key": TOMTOM_KEY, "limit": 1}
-        geo_res = requests.get(geo_url, params=geo_params)
-        geo_data = geo_res.json()
-
-        if not geo_data.get("results"):
-            print(f"⚠️ Geocoding failed for: {destination}")
-            return []
-
-        lat = geo_data["results"][0]["position"]["lat"]
-        lon = geo_data["results"][0]["position"]["lon"]
-        print(f"📍 Geocoded {destination} to {lat}, {lon}")
-
-        # Step 2️⃣: Search for POIs near that location (within 50km)
-        search_url = f"https://api.tomtom.com/search/2/poiSearch/{query}.json"
-        search_params = {
-            "key": TOMTOM_KEY,
-            "lat": lat,
-            "lon": lon,
-            "radius": 50000,   # 50 km radius
-            "limit": limit
-        }
-        search_res = requests.get(search_url, params=search_params)
-        data = search_res.json()
-
-        # Step 3️⃣: Extract POI names
-        results = [r["poi"]["name"] for r in data.get("results", []) if "poi" in r]
-        print(f"🌍 Found {len(results)} {query} near {destination}")
-        return results
-
-    except Exception as e:
-        print("❌ TomTom API Error:", e)
+    lat, lon = await geocode_destination(session, destination)
+    if lat is None or lon is None:
         return []
+    url = f"https://api.tomtom.com/search/2/poiSearch/{query}.json"
+    params = {"key": TOMTOM_KEY, "lat": lat, "lon": lon, "radius": 50000, "limit": limit}
+    data = await fetch_json(session, url, params)
+    results = [r["poi"]["name"] for r in data.get("results", []) if "poi" in r]
+    print(f"🌍 Found {len(results)} {query} near {destination}")
+    return results
 
-
-def generate_with_gemini(prompt):
-    """Generate itinerary using Gemini API."""
-    try:
-        model = genai.GenerativeModel("gemini-1.5-flash")
-        response = model.generate_content(prompt)
-        return {"source": "gemini", "text": response.text}
-    except Exception as e:
-        print("❌ Gemini generation error:", e)
-        return None
-
-
-def generate_rule_based_itinerary(destination, days, interests):
-    """Generate non-repetitive itinerary using TomTom results."""
+def generate_rule_based_itinerary(destination, days, interests, poi_data=None):
+    """Fallback rule-based itinerary using POI data."""
     interests = interests.lower()
     activity_types = {
         "nature": "park",
@@ -126,8 +100,7 @@ def generate_rule_based_itinerary(destination, days, interests):
             added = False
             for interest in interests.split(","):
                 interest = interest.strip()
-                keyword = activity_types.get(interest, "tourist attraction")
-                places = search_places_tomtom(keyword, destination, limit=5)
+                places = poi_data.get(interest, []) if poi_data else []
                 if places:
                     choices = [p for p in places if p not in used_places]
                     if not choices:
@@ -138,8 +111,7 @@ def generate_rule_based_itinerary(destination, days, interests):
                     added = True
                     break
             if not added:
-                day_items.append({"time": time, "activity": "Explore a local market or cafe"})
-
+                day_items.append({"time": time, "activity": "Explore a local cafe or market"})
         itinerary.append({"day": i + 1, "items": day_items})
 
     return {
@@ -148,44 +120,77 @@ def generate_rule_based_itinerary(destination, days, interests):
         "itinerary": itinerary
     }
 
+async def generate_with_gemini(destination, days, interests):
+    """Generate structured itinerary using Gemini."""
+    try:
+        model = genai.GenerativeModel("gemini-1.5-flash")
+        prompt = f"""
+        You are an expert travel planner. Create a {days}-day itinerary for {destination}.
+        User interests: {interests}.
+        Return ONLY valid JSON in this format:
+        {{
+          "days": [
+            {{
+              "day": 1,
+              "morning": "Visit ...",
+              "afternoon": "Explore ...",
+              "evening": "Enjoy ..."
+            }}
+          ]
+        }}
+        Do not include markdown, commentary, or extra text.
+        """
+        response = model.generate_content(prompt)
+        text = response.text.strip()
+        try:
+            parsed = json.loads(text)
+            print("✅ Gemini output parsed successfully")
+            return {"source": "gemini", "structured": parsed}
+        except json.JSONDecodeError:
+            print("⚠️ Invalid JSON — returning raw text")
+            return {"source": "gemini", "text": text}
+    except Exception as e:
+        print("❌ Gemini generation error:", e)
+        return None
+
 # --------------------------
 # Flask Routes
 # --------------------------
+
 @app.route("/")
 def home():
     return render_template("index.html")
 
 @app.route("/api/itinerary", methods=["POST"])
-def api_itinerary():
+async def api_itinerary():
+    """Async route for itinerary generation."""
     print("🛰️ /api/itinerary called")
     data = request.json or {}
     destination = data.get("destination", "Unknown")
     days = int(data.get("days", 3))
     interests = data.get("interests", "culture, food")
 
-    weather_note = get_weather(destination)
+    async with aiohttp.ClientSession() as session:
+        # Run weather + POI fetch concurrently
+        weather_task = asyncio.create_task(get_weather_async(session, destination))
+        poi_tasks = {i: asyncio.create_task(search_places_tomtom_async(session, i.strip(), destination, limit=4))
+                     for i in interests.split(",")}
+        weather_note = await weather_task
+        poi_data = {k: await v for k, v in poi_tasks.items()}
 
-    # Gemini Prompt
-    prompt = f"""
-    You are an expert travel planner. Create a {days}-day itinerary for {destination}.
-    User interests: {interests}.
-    Suggest unique experiences and avoid repetition.
-    Each day should have Morning, Afternoon, and Evening activities.
-    Respond in clear structured text.
-    """
-
-    ai_result = generate_with_gemini(prompt)
+    # Try Gemini first
+    ai_result = await generate_with_gemini(destination, days, interests)
     if ai_result:
         ai_result["meta"] = {"destination": destination, "days": days, "weather_note": weather_note}
         return jsonify({"ok": True, "generated": ai_result})
 
-    # If Gemini fails → fallback to TomTom-based
-    fallback = generate_rule_based_itinerary(destination, days, interests)
+    # Fallback if Gemini fails
+    fallback = generate_rule_based_itinerary(destination, days, interests, poi_data)
     fallback["meta"]["weather_note"] = weather_note
     return jsonify({"ok": True, "generated": fallback})
 
 # --------------------------
-# Render-ready Entry Point
+# Entry Point
 # --------------------------
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
