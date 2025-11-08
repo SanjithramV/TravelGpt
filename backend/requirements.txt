@@ -1,4 +1,4 @@
-flask[async]
+flask
 python-dotenv
 requests
 google-generativeai
