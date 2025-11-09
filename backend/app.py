@@ -11,6 +11,11 @@ import traceback
 # Load Environment Variables
 # --------------------------
 load_dotenv()
+print("🔍 Checking environment variable visibility in Render...")
+print("🔹 GEMINI_API_KEY present:", bool(os.getenv("GEMINI_API_KEY")))
+print("🔹 TOMTOM_KEY present:", bool(os.getenv("TOMTOM_KEY")))
+print("🔹 OPENWEATHER_KEY present:", bool(os.getenv("OPENWEATHER_KEY")))
+
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 TOMTOM_KEY = os.getenv("TOMTOM_KEY")
