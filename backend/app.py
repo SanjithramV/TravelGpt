@@ -96,7 +96,7 @@ def generate_with_gemini(prompt):
 
     try:
         print("🧠 Calling Gemini API...")
-        model = genai.GenerativeModel("gemini-1.5-flash")
+        model = genai.GenerativeModel("gemini-1.0-pro")
         response = model.generate_content(prompt)
 
         # Log raw response for visibility
