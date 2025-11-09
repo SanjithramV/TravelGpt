@@ -175,6 +175,8 @@ def api_itinerary():
     Suggest unique experiences and avoid repetition.
     Each day should have Morning, Afternoon, and Evening activities.
     Respond in clear structured text.
+    Respond in clean plain text with no markdown, no headings, and no symbols like ### or ---.
+    Keep it short, readable, and realistic. Avoid long paragraphs or extra explanations.
     """
 
     ai_result = generate_with_gemini(prompt)
